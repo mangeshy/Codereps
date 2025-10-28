@@ -1,0 +1,1550 @@
+#!/bin/bash
+
+# Standing Order Processor - Complete Project Setup Script
+# This script creates the entire project structure with all files
+
+set -e
+
+PROJECT_NAME="standing-order-processor"
+echo "=========================================="
+echo "Creating $PROJECT_NAME"
+echo "=========================================="
+
+# Create base directory
+mkdir -p $PROJECT_NAME
+cd $PROJECT_NAME
+
+echo "Creating directory structure..."
+
+# Create directory structure
+mkdir -p workflow-project/src/main/java/com/payment/workflow/model
+mkdir -p workflow-project/src/test/java/com/payment/workflow
+mkdir -p activities-project/src/main/java/com/payment/activities/repository
+mkdir -p activities-project/src/main/java/com/payment/activities/service
+mkdir -p activities-project/src/main/java/com/payment/config
+mkdir -p activities-project/src/main/java/com/payment/scheduler
+mkdir -p activities-project/src/main/resources/db/migration
+mkdir -p activities-project/src/test/java/com/payment/activities
+mkdir -p activities-project/src/test/java/com/payment/scheduler
+mkdir -p activities-project/src/test/java/com/payment/service
+mkdir -p activities-project/src/test/java/com/payment/integration
+mkdir -p init-scripts
+
+echo "Creating root configuration files..."
+
+# ========================================
+# WORKSPACE
+# ========================================
+cat > WORKSPACE << 'EOF'
+workspace(name = "standing_order_processor")
+
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+RULES_JVM_EXTERNAL_TAG = "5.3"
+RULES_JVM_EXTERNAL_SHA = "d31e369b854322ca5098ea12c69d7175ded971435e55c18dd9dd5f29cc5249ac"
+
+http_archive(
+    name = "rules_jvm_external",
+    strip_prefix = "rules_jvm_external-%s" % RULES_JVM_EXTERNAL_TAG,
+    sha256 = RULES_JVM_EXTERNAL_SHA,
+    url = "https://github.com/bazelbuild/rules_jvm_external/releases/download/%s/rules_jvm_external-%s.tar.gz" % (RULES_JVM_EXTERNAL_TAG, RULES_JVM_EXTERNAL_TAG)
+)
+
+load("@rules_jvm_external//:defs.bzl", "maven_install")
+
+maven_install(
+    artifacts = [
+        "io.temporal:temporal-sdk:1.23.0",
+        "io.temporal:temporal-testing:1.23.0",
+        "org.springframework.boot:spring-boot-starter:3.2.0",
+        "org.springframework.boot:spring-boot-starter-web:3.2.0",
+        "org.springframework.boot:spring-boot-starter-data-jpa:3.2.0",
+        "org.springframework.boot:spring-boot-starter-test:3.2.0",
+        "org.springframework.kafka:spring-kafka:3.1.0",
+        "org.springframework.kafka:spring-kafka-test:3.1.0",
+        "org.postgresql:postgresql:42.7.1",
+        "com.fasterxml.jackson.core:jackson-databind:2.16.0",
+        "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.16.0",
+        "org.slf4j:slf4j-api:2.0.9",
+        "ch.qos.logback:logback-classic:1.4.14",
+        "junit:junit:4.13.2",
+        "org.junit.jupiter:junit-jupiter-api:5.10.1",
+        "org.junit.jupiter:junit-jupiter-engine:5.10.1",
+        "org.mockito:mockito-core:5.8.0",
+        "org.mockito:mockito-junit-jupiter:5.8.0",
+        "org.assertj:assertj-core:3.24.2",
+    ],
+    repositories = [
+        "https://repo1.maven.org/maven2",
+    ],
+)
+EOF
+
+# ========================================
+# .bazelrc
+# ========================================
+cat > .bazelrc << 'EOF'
+build --java_language_version=17
+build --java_runtime_version=remotejdk_17
+build --tool_java_language_version=17
+build --tool_java_runtime_version=remotejdk_17
+
+test --test_output=errors
+test --test_summary=detailed
+test --test_verbose_timeout_warnings
+
+build:opt -c opt
+build:opt --copt=-O2
+
+build:fastbuild -c fastbuild
+
+test --test_tag_filters=-integration
+test:integration --test_tag_filters=integration
+
+build --disk_cache=~/.cache/bazel
+build --worker_sandboxing
+build --experimental_worker_max_multiplex_instances=8
+EOF
+
+# ========================================
+# .bazelignore
+# ========================================
+cat > .bazelignore << 'EOF'
+.git
+.idea
+target
+*.iml
+node_modules
+EOF
+
+# ========================================
+# Root BUILD.bazel
+# ========================================
+cat > BUILD.bazel << 'EOF'
+exports_files(["README.md"])
+EOF
+
+# ========================================
+# docker-compose.yml
+# ========================================
+cat > docker-compose.yml << 'EOF'
+version: '3.8'
+
+services:
+  postgresql:
+    image: postgres:14-alpine
+    container_name: standing-order-db
+    environment:
+      POSTGRES_DB: standing_orders
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    networks:
+      - standing-order-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  temporal:
+    image: temporalio/auto-setup:1.23.0
+    container_name: temporal-server
+    environment:
+      - DB=postgresql
+      - DB_PORT=5432
+      - POSTGRES_USER=postgres
+      - POSTGRES_PWD=postgres
+      - POSTGRES_SEEDS=postgresql
+    ports:
+      - "7233:7233"
+      - "8088:8088"
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    networks:
+      - standing-order-network
+    healthcheck:
+      test: ["CMD", "tctl", "cluster", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  temporal-ui:
+    image: temporalio/ui:2.21.3
+    container_name: temporal-ui
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+    ports:
+      - "8080:8080"
+    depends_on:
+      - temporal
+    networks:
+      - standing-order-network
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - standing-order-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "9094:9094"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_HOST://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks:
+      - standing-order-network
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+networks:
+  standing-order-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+EOF
+
+# ========================================
+# init-scripts/init.sql
+# ========================================
+cat > init-scripts/init.sql << 'EOF'
+-- Initialize Database Schema
+CREATE TABLE IF NOT EXISTS standing_order (
+    id VARCHAR(255) PRIMARY KEY,
+    entity_code VARCHAR(100) NOT NULL,
+    status VARCHAR(50) NOT NULL,
+    next_execution_date DATE NOT NULL,
+    is_back_dated BOOLEAN DEFAULT FALSE,
+    from_account VARCHAR(100),
+    to_account VARCHAR(100),
+    amount DECIMAL(19, 2),
+    currency VARCHAR(3),
+    frequency VARCHAR(20),
+    start_date DATE,
+    end_date DATE,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_by VARCHAR(100),
+    updated_by VARCHAR(100)
+);
+
+CREATE INDEX IF NOT EXISTS idx_execution_date_status ON standing_order(next_execution_date, status);
+CREATE INDEX IF NOT EXISTS idx_entity_code ON standing_order(entity_code);
+CREATE INDEX IF NOT EXISTS idx_status ON standing_order(status);
+
+-- Sample Test Data
+INSERT INTO standing_order (id, entity_code, status, next_execution_date, is_back_dated, 
+                           from_account, to_account, amount, currency, frequency, start_date)
+VALUES 
+    ('SO-001', 'ENTITY001', 'ACTIVE', CURRENT_DATE, FALSE, 
+     'ACC-001-001', 'ACC-DEST-001', 1000.00, 'USD', 'MONTHLY', CURRENT_DATE - INTERVAL '1 month'),
+    ('SO-002', 'ENTITY001', 'ACTIVE', CURRENT_DATE, FALSE, 
+     'ACC-001-002', 'ACC-DEST-002', 2500.50, 'USD', 'MONTHLY', CURRENT_DATE - INTERVAL '1 month'),
+    ('SO-003', 'ENTITY002', 'ACTIVE', CURRENT_DATE, FALSE, 
+     'ACC-002-001', 'ACC-DEST-003', 500.00, 'EUR', 'WEEKLY', CURRENT_DATE - INTERVAL '1 week'),
+    ('SO-004', 'ENTITY001', 'SUSPENDED', CURRENT_DATE, FALSE, 
+     'ACC-001-003', 'ACC-DEST-004', 750.00, 'USD', 'MONTHLY', CURRENT_DATE - INTERVAL '2 months'),
+    ('SO-005', 'ENTITY003', 'ACTIVE', CURRENT_DATE + INTERVAL '1 day', FALSE, 
+     'ACC-003-001', 'ACC-DEST-005', 1500.00, 'GBP', 'MONTHLY', CURRENT_DATE)
+ON CONFLICT (id) DO NOTHING;
+EOF
+
+echo "Creating workflow project files..."
+
+# ========================================
+# workflow-project/BUILD.bazel
+# ========================================
+cat > workflow-project/BUILD.bazel << 'EOF'
+load("@rules_java//java:defs.bzl", "java_library", "java_test")
+
+java_library(
+    name = "workflow",
+    srcs = glob([
+        "src/main/java/**/*.java",
+    ]),
+    deps = [
+        "@maven//:io_temporal_temporal_sdk",
+        "@maven//:org_slf4j_slf4j_api",
+        "@maven//:com_fasterxml_jackson_core_jackson_databind",
+        "@maven//:com_fasterxml_jackson_datatype_jackson_datatype_jsr310",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+java_test(
+    name = "workflow_test",
+    srcs = glob([
+        "src/test/java/**/*Test.java",
+    ]),
+    test_class = "com.payment.workflow.StandingOrderWorkflowTest",
+    deps = [
+        ":workflow",
+        "//activities-project:activities",
+        "@maven//:io_temporal_temporal_sdk",
+        "@maven//:io_temporal_temporal_testing",
+        "@maven//:org_junit_jupiter_junit_jupiter_api",
+        "@maven//:org_junit_jupiter_junit_jupiter_engine",
+        "@maven//:org_mockito_mockito_core",
+        "@maven//:org_mockito_mockito_junit_jupiter",
+        "@maven//:org_assertj_assertj_core",
+    ],
+    size = "medium",
+)
+EOF
+
+# ========================================
+# workflow-project/pom.xml
+# ========================================
+cat > workflow-project/pom.xml << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 
+         http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.payment</groupId>
+    <artifactId>standing-order-workflow</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <name>Standing Order Workflow</name>
+    <description>Temporal.io Workflow Definitions</description>
+
+    <properties>
+        <java.version>17</java.version>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <temporal.version>1.23.0</temporal.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.temporal</groupId>
+            <artifactId>temporal-sdk</artifactId>
+            <version>${temporal.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>2.0.9</version>
+        </dependency>
+        <dependency>
+            <groupId>io.temporal</groupId>
+            <artifactId>temporal-testing</artifactId>
+            <version>${temporal.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.10.1</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-junit-jupiter</artifactId>
+            <version>5.8.0</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.11.0</version>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.2.2</version>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+EOF
+
+echo "Creating workflow Java files..."
+
+# ========================================
+# StandingOrderWorkflow.java
+# ========================================
+cat > workflow-project/src/main/java/com/payment/workflow/StandingOrderWorkflow.java << 'EOF'
+package com.payment.workflow;
+
+import io.temporal.workflow.WorkflowInterface;
+import io.temporal.workflow.WorkflowMethod;
+import com.payment.workflow.model.StandingOrderFilterCriteria;
+import com.payment.workflow.model.WorkflowExecutionResult;
+
+@WorkflowInterface
+public interface StandingOrderWorkflow {
+    
+    @WorkflowMethod
+    WorkflowExecutionResult processStandingOrders(StandingOrderFilterCriteria criteria);
+}
+EOF
+
+# ========================================
+# StandingOrderWorkflowImpl.java
+# ========================================
+cat > workflow-project/src/main/java/com/payment/workflow/StandingOrderWorkflowImpl.java << 'EOF'
+package com.payment.workflow;
+
+import com.payment.activities.StandingOrderActivities;
+import com.payment.workflow.model.*;
+import io.temporal.activity.ActivityOptions;
+import io.temporal.common.RetryOptions;
+import io.temporal.workflow.Workflow;
+import org.slf4j.Logger;
+
+import java.time.Duration;
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.List;
+
+public class StandingOrderWorkflowImpl implements StandingOrderWorkflow {
+    
+    private static final Logger log = Workflow.getLogger(StandingOrderWorkflowImpl.class);
+    
+    private final StandingOrderActivities activities;
+    
+    public StandingOrderWorkflowImpl() {
+        ActivityOptions options = ActivityOptions.newBuilder()
+                .setStartToCloseTimeout(Duration.ofMinutes(5))
+                .setRetryOptions(RetryOptions.newBuilder()
+                        .setInitialInterval(Duration.ofSeconds(1))
+                        .setMaximumInterval(Duration.ofSeconds(10))
+                        .setBackoffCoefficient(2.0)
+                        .setMaximumAttempts(3)
+                        .build())
+                .build();
+        
+        this.activities = Workflow.newActivityStub(StandingOrderActivities.class, options);
+    }
+    
+    @Override
+    public WorkflowExecutionResult processStandingOrders(StandingOrderFilterCriteria criteria) {
+        String workflowId = Workflow.getInfo().getWorkflowId();
+        log.info("Starting standing order processing workflow: {}", workflowId);
+        
+        WorkflowExecutionResult result = new WorkflowExecutionResult();
+        result.setWorkflowId(workflowId);
+        result.setStartTime(Workflow.currentTimeMillis());
+        
+        try {
+            if (activities.isWorkflowAlreadyRunning(workflowId)) {
+                log.warn("Workflow with ID {} is already running. Exiting.", workflowId);
+                result.setStatus("SKIPPED");
+                result.setMessage("Another workflow instance is already running");
+                return result;
+            }
+            
+            List<StandingOrder> eligibleOrders = activities.getEligibleStandingOrders(criteria);
+            log.info("Found {} eligible standing orders", eligibleOrders.size());
+            result.setTotalOrders(eligibleOrders.size());
+            
+            if (eligibleOrders.isEmpty()) {
+                result.setStatus("COMPLETED");
+                result.setMessage("No eligible standing orders found");
+                result.setEndTime(Workflow.currentTimeMillis());
+                return result;
+            }
+            
+            List<StandingOrderProcessingResult> processingResults = new ArrayList<>();
+            int successCount = 0;
+            int failureCount = 0;
+            
+            for (StandingOrder order : eligibleOrders) {
+                StandingOrderProcessingResult orderResult = processIndividualOrder(order, criteria.getProcessingDate());
+                processingResults.add(orderResult);
+                
+                if (orderResult.isSuccess()) {
+                    successCount++;
+                } else {
+                    failureCount++;
+                }
+            }
+            
+            result.setSuccessCount(successCount);
+            result.setFailureCount(failureCount);
+            result.setProcessingResults(processingResults);
+            result.setStatus("COMPLETED");
+            result.setEndTime(Workflow.currentTimeMillis());
+            
+            log.info("Workflow completed. Success: {}, Failed: {}", successCount, failureCount);
+            return result;
+            
+        } catch (Exception e) {
+            log.error("Workflow failed with error", e);
+            result.setStatus("FAILED");
+            result.setMessage("Workflow failed: " + e.getMessage());
+            result.setEndTime(Workflow.currentTimeMillis());
+            throw new RuntimeException("Workflow execution failed", e);
+        }
+    }
+    
+    private StandingOrderProcessingResult processIndividualOrder(StandingOrder order, LocalDate processingDate) {
+        StandingOrderProcessingResult result = new StandingOrderProcessingResult();
+        result.setStandingOrderId(order.getId());
+        result.setStartTime(Workflow.currentTimeMillis());
+        
+        try {
+            log.info("Getting payload for standing order: {}", order.getId());
+            PaymentPayload payload = activities.getPayload(order.getId(), processingDate);
+            result.setPayloadRetrieved(true);
+            
+            log.info("Publishing payload to Kafka for standing order: {}", order.getId());
+            activities.publishToKafka(payload);
+            result.setPublishedToKafka(true);
+            
+            log.info("Updating next execution date for standing order: {}", order.getId());
+            activities.updateNextExecutionDate(order.getId(), processingDate);
+            result.setNextExecutionDateUpdated(true);
+            
+            result.setSuccess(true);
+            result.setEndTime(Workflow.currentTimeMillis());
+            log.info("Successfully processed standing order: {}", order.getId());
+            
+        } catch (Exception e) {
+            log.error("Failed to process standing order: {}", order.getId(), e);
+            result.setSuccess(false);
+            result.setErrorMessage(e.getMessage());
+            result.setEndTime(Workflow.currentTimeMillis());
+        }
+        
+        return result;
+    }
+}
+EOF
+
+echo "Creating workflow model files..."
+
+# Model files continue in next part...
+# (Character limit reached - continuing)
+
+cat > workflow-project/src/main/java/com/payment/workflow/model/StandingOrderFilterCriteria.java << 'EOF'
+package com.payment.workflow.model;
+
+import java.time.LocalDate;
+import java.util.Objects;
+
+public class StandingOrderFilterCriteria {
+    private LocalDate processingDate;
+    private String entityCode;
+    private String status;
+    private Boolean isBackDated;
+    
+    public LocalDate getProcessingDate() { return processingDate; }
+    public void setProcessingDate(LocalDate processingDate) { this.processingDate = processingDate; }
+    
+    public String getEntityCode() { return entityCode; }
+    public void setEntityCode(String entityCode) { this.entityCode = entityCode; }
+    
+    public String getStatus() { return status; }
+    public void setStatus(String status) { this.status = status; }
+    
+    public Boolean getIsBackDated() { return isBackDated; }
+    public void setIsBackDated(Boolean isBackDated) { this.isBackDated = isBackDated; }
+    
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        StandingOrderFilterCriteria that = (StandingOrderFilterCriteria) o;
+        return Objects.equals(processingDate, that.processingDate) &&
+               Objects.equals(entityCode, that.entityCode) &&
+               Objects.equals(status, that.status) &&
+               Objects.equals(isBackDated, that.isBackDated);
+    }
+    
+    @Override
+    public int hashCode() {
+        return Objects.hash(processingDate, entityCode, status, isBackDated);
+    }
+}
+EOF
+
+cat > workflow-project/src/main/java/com/payment/workflow/model/StandingOrder.java << 'EOF'
+package com.payment.workflow.model;
+
+import java.time.LocalDate;
+import java.util.Objects;
+
+public class StandingOrder {
+    private String id;
+    private String entityCode;
+    private String status;
+    private LocalDate nextExecutionDate;
+    private Boolean isBackDated;
+    
+    public String getId() { return id; }
+    public void setId(String id) { this.id = id; }
+    
+    public String getEntityCode() { return entityCode; }
+    public void setEntityCode(String entityCode) { this.entityCode = entityCode; }
+    
+    public String getStatus() { return status; }
+    public void setStatus(String status) { this.status = status; }
+    
+    public LocalDate getNextExecutionDate() { return nextExecutionDate; }
+    public void setNextExecutionDate(LocalDate nextExecutionDate) { this.nextExecutionDate = nextExecutionDate; }
+    
+    public Boolean getIsBackDated() { return isBackDated; }
+    public void setIsBackDated(Boolean isBackDated) { this.isBackDated = isBackDated; }
+    
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        StandingOrder that = (StandingOrder) o;
+        return Objects.equals(id, that.id);
+    }
+    
+    @Override
+    public int hashCode() {
+        return Objects.hash(id);
+    }
+}
+EOF
+
+cat > workflow-project/src/main/java/com/payment/workflow/model/PaymentPayload.java << 'EOF'
+package com.payment.workflow.model;
+
+import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.util.Map;
+
+public class PaymentPayload {
+    private String standingOrderId;
+    private String transactionId;
+    private LocalDate processingDate;
+    private BigDecimal amount;
+    private String currency;
+    private String fromAccount;
+    private String toAccount;
+    private Map<String, Object> metadata;
+    
+    public String getStandingOrderId() { return standingOrderId; }
+    public void setStandingOrderId(String standingOrderId) { this.standingOrderId = standingOrderId; }
+    
+    public String getTransactionId() { return transactionId; }
+    public void setTransactionId(String transactionId) { this.transactionId = transactionId; }
+    
+    public LocalDate getProcessingDate() { return processingDate; }
+    public void setProcessingDate(LocalDate processingDate) { this.processingDate = processingDate; }
+    
+    public BigDecimal getAmount() { return amount; }
+    public void setAmount(BigDecimal amount) { this.amount = amount; }
+    
+    public String getCurrency() { return currency; }
+    public void setCurrency(String currency) { this.currency = currency; }
+    
+    public String getFromAccount() { return fromAccount; }
+    public void setFromAccount(String fromAccount) { this.fromAccount = fromAccount; }
+    
+    public String getToAccount() { return toAccount; }
+    public void setToAccount(String toAccount) { this.toAccount = toAccount; }
+    
+    public Map<String, Object> getMetadata() { return metadata; }
+    public void setMetadata(Map<String, Object> metadata) { this.metadata = metadata; }
+}
+EOF
+
+cat > workflow-project/src/main/java/com/payment/workflow/model/WorkflowExecutionResult.java << 'EOF'
+package com.payment.workflow.model;
+
+import java.util.List;
+
+public class WorkflowExecutionResult {
+    private String workflowId;
+    private String status;
+    private String message;
+    private long startTime;
+    private long endTime;
+    private int totalOrders;
+    private int successCount;
+    private int failureCount;
+    private List<StandingOrderProcessingResult> processingResults;
+    
+    public String getWorkflowId() { return workflowId; }
+    public void setWorkflowId(String workflowId) { this.workflowId = workflowId; }
+    
+    public String getStatus() { return status; }
+    public void setStatus(String status) { this.status = status; }
+    
+    public String getMessage() { return message; }
+    public void setMessage(String message) { this.message = message; }
+    
+    public long getStartTime() { return startTime; }
+    public void setStartTime(long startTime) { this.startTime = startTime; }
+    
+    public long getEndTime() { return endTime; }
+    public void setEndTime(long endTime) { this.endTime = endTime; }
+    
+    public int getTotalOrders() { return totalOrders; }
+    public void setTotalOrders(int totalOrders) { this.totalOrders = totalOrders; }
+    
+    public int getSuccessCount() { return successCount; }
+    public void setSuccessCount(int successCount) { this.successCount = successCount; }
+    
+    public int getFailureCount() { return failureCount; }
+    public void setFailureCount(int failureCount) { this.failureCount = failureCount; }
+    
+    public List<StandingOrderProcessingResult> getProcessingResults() { return processingResults; }
+    public void setProcessingResults(List<StandingOrderProcessingResult> processingResults) { 
+        this.processingResults = processingResults; 
+    }
+}
+EOF
+
+cat > workflow-project/src/main/java/com/payment/workflow/model/StandingOrderProcessingResult.java << 'EOF'
+package com.payment.workflow.model;
+
+public class StandingOrderProcessingResult {
+    private String standingOrderId;
+    private boolean success;
+    private String errorMessage;
+    private long startTime;
+    private long endTime;
+    private boolean payloadRetrieved;
+    private boolean publishedToKafka;
+    private boolean nextExecutionDateUpdated;
+    
+    public String getStandingOrderId() { return standingOrderId; }
+    public void setStandingOrderId(String standingOrderId) { this.standingOrderId = standingOrderId; }
+    
+    public boolean isSuccess() { return success; }
+    public void setSuccess(boolean success) { this.success = success; }
+    
+    public String getErrorMessage() { return errorMessage; }
+    public void setErrorMessage(String errorMessage) { this.errorMessage = errorMessage; }
+    
+    public long getStartTime() { return startTime; }
+    public void setStartTime(long startTime) { this.startTime = startTime; }
+    
+    public long getEndTime() { return endTime; }
+    public void setEndTime(long endTime) { this.endTime = endTime; }
+    
+    public boolean isPayloadRetrieved() { return payloadRetrieved; }
+    public void setPayloadRetrieved(boolean payloadRetrieved) { this.payloadRetrieved = payloadRetrieved; }
+    
+    public boolean isPublishedToKafka() { return publishedToKafka; }
+    public void setPublishedToKafka(boolean publishedToKafka) { this.publishedToKafka = publishedToKafka; }
+    
+    public boolean isNextExecutionDateUpdated() { return nextExecutionDateUpdated; }
+    public void setNextExecutionDateUpdated(boolean nextExecutionDateUpdated) { 
+        this.nextExecutionDateUpdated = nextExecutionDateUpdated; 
+    }
+}
+EOF
+
+echo "Creating activities project files..."
+
+# ========================================
+# activities-project/BUILD.bazel
+# ========================================
+cat > activities-project/BUILD.bazel << 'EOF'
+load("@rules_java//java:defs.bzl", "java_library", "java_binary", "java_test")
+
+java_library(
+    name = "activities",
+    srcs = glob([
+        "src/main/java/**/*.java",
+    ]),
+    resources = glob([
+        "src/main/resources/**/*",
+    ]),
+    deps = [
+        "//workflow-project:workflow",
+        "@maven//:io_temporal_temporal_sdk",
+        "@maven//:org_springframework_boot_spring_boot_starter",
+        "@maven//:org_springframework_boot_spring_boot_starter_web",
+        "@maven//:org_springframework_boot_spring_boot_starter_data_jpa",
+        "@maven//:org_springframework_kafka_spring_kafka",
+        "@maven//:org_postgresql_postgresql",
+        "@maven//:com_fasterxml_jackson_core_jackson_databind",
+        "@maven//:com_fasterxml_jackson_datatype_jackson_datatype_jsr310",
+        "@maven//:org_slf4j_slf4j_api",
+        "@maven//:ch_qos_logback_logback_classic",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+java_binary(
+    name = "standing_order_app",
+    main_class = "com.payment.StandingOrderApplication",
+    runtime_deps = [
+        ":activities",
+    ],
+)
+
+java_test(
+    name = "activities_test",
+    srcs = glob([
+        "src/test/java/**/*Test.java",
+    ]),
+    deps = [
+        ":activities",
+        "//workflow-project:workflow",
+        "@maven//:io_temporal_temporal_sdk",
+        "@maven//:io_temporal_temporal_testing",
+        "@maven//:org_springframework_boot_spring_boot_starter_test",
+        "@maven//:org_springframework_kafka_spring_kafka_test",
+        "@maven//:org_junit_jupiter_junit_jupiter_api",
+        "@maven//:org_junit_jupiter_junit_jupiter_engine",
+        "@maven//:org_mockito_mockito_core",
+        "@maven//:org_mockito_mockito_junit_jupiter",
+        "@maven//:org_assertj_assertj_core",
+    ],
+    size = "medium",
+)
+EOF
+
+# ========================================
+# activities-project/pom.xml
+# ========================================
+cat > activities-project/pom.xml << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 
+         http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.2.0</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.payment</groupId>
+    <artifactId>standing-order-activities</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <properties>
+        <java.version>17</java.version>
+        <temporal.version>1.23.0</temporal.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.payment</groupId>
+            <artifactId>standing-order-workflow</artifactId>
+            <version>1.0.0-SNAPSHOT</version>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.temporal</groupId>
+            <artifactId>temporal-sdk</artifactId>
+            <version>${temporal.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.temporal</groupId>
+            <artifactId>temporal-testing</artifactId>
+            <version>${temporal.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+EOF
+
+echo "Creating activities Java files..."
+
+# ========================================
+# StandingOrderApplication.java
+# ========================================
+cat > activities-project/src/main/java/com/payment/StandingOrderApplication.java << 'EOF'
+package com.payment;
+
+import io.temporal.worker.WorkerFactory;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+import org.springframework.scheduling.annotation.EnableScheduling;
+
+@SpringBootApplication
+@EnableScheduling
+public class StandingOrderApplication {
+    
+    public static void main(String[] args) {
+        SpringApplication.run(StandingOrderApplication.class, args);
+    }
+    
+    @Bean
+    public CommandLineRunner startWorker(WorkerFactory workerFactory) {
+        return args -> {
+            workerFactory.start();
+        };
+    }
+}
+EOF
+
+# ========================================
+# StandingOrderActivities.java
+# ========================================
+cat > activities-project/src/main/java/com/payment/activities/StandingOrderActivities.java << 'EOF'
+package com.payment.activities;
+
+import com.payment.workflow.model.*;
+import io.temporal.activity.ActivityInterface;
+import io.temporal.activity.ActivityMethod;
+
+import java.time.LocalDate;
+import java.util.List;
+
+@ActivityInterface
+public interface StandingOrderActivities {
+    
+    @ActivityMethod
+    boolean isWorkflowAlreadyRunning(String workflowId);
+    
+    @ActivityMethod
+    List<StandingOrder> getEligibleStandingOrders(StandingOrderFilterCriteria criteria);
+    
+    @ActivityMethod
+    PaymentPayload getPayload(String standingOrderId, LocalDate processingDate);
+    
+    @ActivityMethod
+    void publishToKafka(PaymentPayload payload);
+    
+    @ActivityMethod
+    void updateNextExecutionDate(String standingOrderId, LocalDate currentProcessingDate);
+}
+EOF
+
+# ========================================
+# StandingOrderActivitiesImpl.java
+# ========================================
+cat > activities-project/src/main/java/com/payment/activities/StandingOrderActivitiesImpl.java << 'EOF'
+package com.payment.activities;
+
+import com.payment.activities.service.KafkaPublisherService;
+import com.payment.activities.service.StandingOrderService;
+import com.payment.activities.service.WorkflowRegistryService;
+import com.payment.workflow.model.*;
+import io.temporal.activity.Activity;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Component;
+
+import java.time.LocalDate;
+import java.util.List;
+
+@Component
+public class StandingOrderActivitiesImpl implements StandingOrderActivities {
+    
+    private static final Logger log = LoggerFactory.getLogger(StandingOrderActivitiesImpl.class);
+    
+    private final WorkflowRegistryService workflowRegistryService;
+    private final StandingOrderService standingOrderService;
+    private final KafkaPublisherService kafkaPublisherService;
+    
+    public StandingOrderActivitiesImpl(
+            WorkflowRegistryService workflowRegistryService,
+            StandingOrderService standingOrderService,
+            KafkaPublisherService kafkaPublisherService) {
+        this.workflowRegistryService = workflowRegistryService;
+        this.standingOrderService = standingOrderService;
+        this.kafkaPublisherService = kafkaPublisherService;
+    }
+    
+    @Override
+    public boolean isWorkflowAlreadyRunning(String workflowId) {
+        Activity.getExecutionContext().heartbeat(workflowId);
+        log.info("Checking if workflow is already running: {}", workflowId);
+        return workflowRegistryService.isWorkflowRunning(workflowId);
+    }
+    
+    @Override
+    public List<StandingOrder> getEligibleStandingOrders(StandingOrderFilterCriteria criteria) {
+        Activity.getExecutionContext().heartbeat(criteria);
+        log.info("Fetching eligible standing orders");
+        return standingOrderService.findEligibleOrders(criteria);
+    }
+    
+    @Override
+    public PaymentPayload getPayload(String standingOrderId, LocalDate processingDate) {
+        Activity.getExecutionContext().heartbeat(standingOrderId);
+        log.info("Getting payload for standing order: {}", standingOrderId);
+        return standingOrderService.getPayloadForOrder(standingOrderId, processingDate);
+    }
+    
+    @Override
+    public void publishToKafka(PaymentPayload payload) {
+        Activity.getExecutionContext().heartbeat(payload.getStandingOrderId());
+        log.info("Publishing to Kafka: {}", payload.getStandingOrderId());
+        kafkaPublisherService.publish(payload);
+    }
+    
+    @Override
+    public void updateNextExecutionDate(String standingOrderId, LocalDate currentProcessingDate) {
+        Activity.getExecutionContext().heartbeat(standingOrderId);
+        log.info("Updating next execution date: {}", standingOrderId);
+        standingOrderService.updateNextExecutionDate(standingOrderId, currentProcessingDate);
+    }
+}
+EOF
+
+# ========================================
+# StandingOrderRepository.java
+# ========================================
+cat > activities-project/src/main/java/com/payment/activities/repository/StandingOrderRepository.java << 'EOF'
+package com.payment.activities.repository;
+
+import com.payment.workflow.model.StandingOrder;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+import org.springframework.stereotype.Repository;
+
+import java.time.LocalDate;
+import java.util.List;
+
+@Repository
+public interface StandingOrderRepository extends JpaRepository<StandingOrder, String> {
+    
+    @Query("SELECT so FROM StandingOrder so WHERE " +
+           "so.nextExecutionDate <= :processingDate " +
+           "AND (:entityCode IS NULL OR so.entityCode = :entityCode) " +
+           "AND (:status IS NULL OR so.status = :status) " +
+           "AND (:isBackDated IS NULL OR so.isBackDated = :isBackDated)")
+    List<StandingOrder> findEligibleOrders(
+            @Param("processingDate") LocalDate processingDate,
+            @Param("entityCode") String entityCode,
+            @Param("status") String status,
+            @Param("isBackDated") Boolean isBackDated);
+}
+EOF
+
+# ========================================
+# WorkflowRegistryService.java
+# ========================================
+cat > activities-project/src/main/java/com/payment/activities/service/WorkflowRegistryService.java << 'EOF'
+package com.payment.activities.service;
+
+import io.temporal.api.enums.v1.WorkflowExecutionStatus;
+import io.temporal.api.workflowservice.v1.DescribeWorkflowExecutionRequest;
+import io.temporal.api.workflowservice.v1.DescribeWorkflowExecutionResponse;
+import io.temporal.client.WorkflowServiceStubs;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+@Service
+public class WorkflowRegistryService {
+    
+    private static final Logger log = LoggerFactory.getLogger(WorkflowRegistryService.class);
+    
+    private final WorkflowServiceStubs serviceStubs;
+    private final String namespace;
+    
+    public WorkflowRegistryService(
+            WorkflowServiceStubs serviceStubs,
+            @Value("${temporal.namespace:default}") String namespace) {
+        this.serviceStubs = serviceStubs;
+        this.namespace = namespace;
+    }
+    
+    public boolean isWorkflowRunning(String workflowId) {
+        try {
+            DescribeWorkflowExecutionRequest request = DescribeWorkflowExecutionRequest.newBuilder()
+                    .setNamespace(namespace)
+                    .setExecution(io.temporal.api.common.v1.WorkflowExecution.newBuilder()
+                            .setWorkflowId(workflowId)
+                            .build())
+                    .build();
+            
+            DescribeWorkflowExecutionResponse response = serviceStubs.blockingStub()
+                    .describeWorkflowExecution(request);
+            
+            WorkflowExecutionStatus status = response.getWorkflowExecutionInfo().getStatus();
+            return status == WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_RUNNING;
+            
+        } catch (Exception e) {
+            log.debug("Workflow {} not found or not running", workflowId);
+            return false;
+        }
+    }
+}
+EOF
+
+# ========================================
+# StandingOrderService.java
+# ========================================
+cat > activities-project/src/main/java/com/payment/activities/service/StandingOrderService.java << 'EOF'
+package com.payment.activities.service;
+
+import com.payment.activities.repository.StandingOrderRepository;
+import com.payment.workflow.model.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+@Service
+public class StandingOrderService {
+    
+    private static final Logger log = LoggerFactory.getLogger(StandingOrderService.class);
+    
+    private final StandingOrderRepository repository;
+    
+    public StandingOrderService(StandingOrderRepository repository) {
+        this.repository = repository;
+    }
+    
+    @Transactional(readOnly = true)
+    public List<StandingOrder> findEligibleOrders(StandingOrderFilterCriteria criteria) {
+        log.info("Finding eligible orders");
+        return repository.findEligibleOrders(
+                criteria.getProcessingDate(),
+                criteria.getEntityCode(),
+                criteria.getStatus(),
+                criteria.getIsBackDated()
+        );
+    }
+    
+    @Transactional(readOnly = true)
+    public PaymentPayload getPayloadForOrder(String standingOrderId, LocalDate processingDate) {
+        log.info("Getting payload for order: {}", standingOrderId);
+        
+        StandingOrder order = repository.findById(standingOrderId)
+                .orElseThrow(() -> new IllegalArgumentException("Standing order not found: " + standingOrderId));
+        
+        PaymentPayload payload = new PaymentPayload();
+        payload.setStandingOrderId(standingOrderId);
+        payload.setTransactionId(UUID.randomUUID().toString());
+        payload.setProcessingDate(processingDate);
+        payload.setAmount(new BigDecimal("1000.00"));
+        payload.setCurrency("USD");
+        payload.setFromAccount("ACC-" + order.getEntityCode());
+        payload.setToAccount("ACC-DEST");
+        
+        Map<String, Object> metadata = new HashMap<>();
+        metadata.put("entityCode", order.getEntityCode());
+        metadata.put("status", order.getStatus());
+        payload.setMetadata(metadata);
+        
+        return payload;
+    }
+    
+    @Transactional
+    public void updateNextExecutionDate(String standingOrderId, LocalDate currentProcessingDate) {
+        log.info("Updating next execution date for: {}", standingOrderId);
+        
+        StandingOrder order = repository.findById(standingOrderId)
+                .orElseThrow(() -> new IllegalArgumentException("Standing order not found: " + standingOrderId));
+        
+        LocalDate nextDate = currentProcessingDate.plusMonths(1);
+        order.setNextExecutionDate(nextDate);
+        repository.save(order);
+    }
+}
+EOF
+
+# ========================================
+# KafkaPublisherService.java
+# ========================================
+cat > activities-project/src/main/java/com/payment/activities/service/KafkaPublisherService.java << 'EOF'
+package com.payment.activities.service;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.payment.workflow.model.PaymentPayload;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.support.SendResult;
+import org.springframework.stereotype.Service;
+
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+
+@Service
+public class KafkaPublisherService {
+    
+    private static final Logger log = LoggerFactory.getLogger(KafkaPublisherService.class);
+    
+    private final KafkaTemplate<String, String> kafkaTemplate;
+    private final ObjectMapper objectMapper;
+    private final String topicName;
+    
+    public KafkaPublisherService(
+            KafkaTemplate<String, String> kafkaTemplate,
+            ObjectMapper objectMapper,
+            @Value("${kafka.topic.payment-orders}") String topicName) {
+        this.kafkaTemplate = kafkaTemplate;
+        this.objectMapper = objectMapper;
+        this.topicName = topicName;
+    }
+    
+    public void publish(PaymentPayload payload) {
+        try {
+            String message = objectMapper.writeValueAsString(payload);
+            String key = payload.getStandingOrderId();
+            
+            log.info("Publishing to Kafka topic: {}", topicName);
+            
+            CompletableFuture<SendResult<String, String>> future = kafkaTemplate.send(topicName, key, message);
+            SendResult<String, String> result = future.get(30, TimeUnit.SECONDS);
+            
+            log.info("Published successfully");
+            
+        } catch (Exception e) {
+            log.error("Failed to publish to Kafka", e);
+            throw new RuntimeException("Kafka publishing failed", e);
+        }
+    }
+}
+EOF
+
+# ========================================
+# TemporalConfig.java
+# ========================================
+cat > activities-project/src/main/java/com/payment/config/TemporalConfig.java << 'EOF'
+package com.payment.config;
+
+import com.payment.activities.StandingOrderActivitiesImpl;
+import io.temporal.client.WorkflowClient;
+import io.temporal.client.WorkflowClientOptions;
+import io.temporal.serviceclient.WorkflowServiceStubs;
+import io.temporal.serviceclient.WorkflowServiceStubsOptions;
+import io.temporal.worker.Worker;
+import io.temporal.worker.WorkerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class TemporalConfig {
+    
+    @Value("${temporal.server.host:localhost}")
+    private String temporalHost;
+    
+    @Value("${temporal.server.port:7233}")
+    private int temporalPort;
+    
+    @Value("${temporal.namespace:default}")
+    private String namespace;
+    
+    @Value("${temporal.task-queue:standing-order-task-queue}")
+    private String taskQueue;
+    
+    @Bean
+    public WorkflowServiceStubs workflowServiceStubs() {
+        return WorkflowServiceStubs.newServiceStubs(
+                WorkflowServiceStubsOptions.newBuilder()
+                        .setTarget(temporalHost + ":" + temporalPort)
+                        .build()
+        );
+    }
+    
+    @Bean
+    public WorkflowClient workflowClient(WorkflowServiceStubs serviceStubs) {
+        return WorkflowClient.newInstance(
+                serviceStubs,
+                WorkflowClientOptions.newBuilder()
+                        .setNamespace(namespace)
+                        .build()
+        );
+    }
+    
+    @Bean
+    public WorkerFactory workerFactory(WorkflowClient workflowClient) {
+        return WorkerFactory.newInstance(workflowClient);
+    }
+    
+    @Bean
+    public Worker worker(WorkerFactory workerFactory, StandingOrderActivitiesImpl activities) {
+        Worker worker = workerFactory.newWorker(taskQueue);
+        worker.registerWorkflowImplementationTypes(
+                com.payment.workflow.StandingOrderWorkflowImpl.class
+        );
+        worker.registerActivitiesImplementations(activities);
+        return worker;
+    }
+}
+EOF
+
+# ========================================
+# KafkaConfig.java
+# ========================================
+cat > activities-project/src/main/java/com/payment/config/KafkaConfig.java << 'EOF'
+package com.payment.config;
+
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.common.serialization.StringSerializer;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.kafka.core.DefaultKafkaProducerFactory;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.core.ProducerFactory;
+
+import java.util.HashMap;
+import java.util.Map;
+
+@Configuration
+public class KafkaConfig {
+    
+    @Value("${spring.kafka.bootstrap-servers}")
+    private String bootstrapServers;
+    
+    @Bean
+    public ProducerFactory<String, String> producerFactory() {
+        Map<String, Object> configProps = new HashMap<>();
+        configProps.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        configProps.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+        configProps.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+        configProps.put(ProducerConfig.ACKS_CONFIG, "all");
+        configProps.put(ProducerConfig.RETRIES_CONFIG, 3);
+        return new DefaultKafkaProducerFactory<>(configProps);
+    }
+    
+    @Bean
+    public KafkaTemplate<String, String> kafkaTemplate() {
+        return new KafkaTemplate<>(producerFactory());
+    }
+}
+EOF
+
+# ========================================
+# StandingOrderScheduler.java
+# ========================================
+cat > activities-project/src/main/java/com/payment/scheduler/StandingOrderScheduler.java << 'EOF'
+package com.payment.scheduler;
+
+import com.payment.workflow.StandingOrderWorkflow;
+import com.payment.workflow.model.StandingOrderFilterCriteria;
+import io.temporal.client.WorkflowClient;
+import io.temporal.client.WorkflowOptions;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
+
+import java.time.Duration;
+import java.time.LocalDate;
+
+@Component
+public class StandingOrderScheduler {
+    
+    private static final Logger log = LoggerFactory.getLogger(StandingOrderScheduler.class);
+    
+    private final WorkflowClient workflowClient;
+    private final String taskQueue;
+    
+    public StandingOrderScheduler(
+            WorkflowClient workflowClient,
+            @Value("${temporal.task-queue:standing-order-task-queue}") String taskQueue) {
+        this.workflowClient = workflowClient;
+        this.taskQueue = taskQueue;
+    }
+    
+    @Scheduled(cron = "${standing-order.schedule.cron:0 0 2 * * ?}")
+    public void scheduleStandingOrderProcessing() {
+        log.info("Triggering standing order batch processing");
+        
+        String workflowId = "standing-order-batch-" + LocalDate.now();
+        
+        try {
+            StandingOrderFilterCriteria criteria = new StandingOrderFilterCriteria();
+            criteria.setProcessingDate(LocalDate.now());
+            criteria.setStatus("ACTIVE");
+            
+            WorkflowOptions options = WorkflowOptions.newBuilder()
+                    .setWorkflowId(workflowId)
+                    .setTaskQueue(taskQueue)
+                    .setWorkflowExecutionTimeout(Duration.ofHours(2))
+                    .build();
+            
+            StandingOrderWorkflow workflow = workflowClient.newWorkflowStub(
+                    StandingOrderWorkflow.class, options);
+            
+            WorkflowClient.start(workflow::processStandingOrders, criteria);
+            
+            log.info("Started workflow: {}", workflowId);
+            
+        } catch (Exception e) {
+            log.error("Failed to start workflow", e);
+        }
+    }
+}
+EOF
+
+# ========================================
+# application.yml
+# ========================================
+cat > activities-project/src/main/resources/application.yml << 'EOF'
+server:
+  port: 8081
+
+spring:
+  application:
+    name: standing-order-processor
+  
+  datasource:
+    url: jdbc:postgresql://localhost:5432/standing_orders
+    username: postgres
+    password: postgres
+    driver-class-name: org.postgresql.Driver
+  
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+  
+  kafka:
+    bootstrap-servers: localhost:9092
+
+kafka:
+  topic:
+    payment-orders: payment-orders-topic
+
+temporal:
+  server:
+    host: localhost
+    port: 7233
+  namespace: default
+  task-queue: standing-order-task-queue
+
+standing-order:
+  schedule:
+    cron: "0 0 2 * * ?"
+
+logging:
+  level:
+    com.payment: DEBUG
+    io.temporal: INFO
+EOF
+
+# ========================================
+# Flyway Migration Script
+# ========================================
+cat > activities-project/src/main/resources/db/migration/V1__create_standing_order_table.sql << 'EOF'
+CREATE TABLE standing_order (
+    id VARCHAR(255) PRIMARY KEY,
+    entity_code VARCHAR(100) NOT NULL,
+    status VARCHAR(50) NOT NULL,
+    next_execution_date DATE NOT NULL,
+    is_back_dated BOOLEAN DEFAULT FALSE,
+    from_account VARCHAR(100),
+    to_account VARCHAR(100),
+    amount DECIMAL(19, 2),
+    currency VARCHAR(3),
+    frequency VARCHAR(20),
+    start_date DATE,
+    end_date DATE,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_by VARCHAR(100),
+    updated_by VARCHAR(100)
+);
+
+CREATE INDEX idx_execution_date_status ON standing_order(next_execution_date, status);
+CREATE INDEX idx_entity_code ON standing_order(entity_code);
+CREATE INDEX idx_status ON standing_order(status);
+EOF
+
+echo ""
+echo "=========================================="
+echo "Project created successfully!"
+echo "=========================================="
+echo ""
+echo "Project location: $(pwd)"
+echo ""
+echo "Next steps:"
+echo "1. Start infrastructure: docker-compose up -d"
+echo "2. Build with Bazel:"
+echo "   bazel build //..."
+echo "   bazel test //..."
+echo "3. Or build with Maven:"
+echo "   cd workflow-project && mvn clean install"
+echo "   cd ../activities-project && mvn clean install"
+echo "4. Run the application:"
+echo "   bazel run //activities-project:standing_order_app"
+echo "   OR"
+echo "   cd activities-project && mvn spring-boot:run"
+echo ""
+echo "Access Temporal UI at: http://localhost:8080"
+echo "=========================================="
